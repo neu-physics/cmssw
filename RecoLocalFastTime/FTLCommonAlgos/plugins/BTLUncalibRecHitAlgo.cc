@@ -46,10 +46,15 @@ FTLUncalibratedRecHit BTLUncalibRecHitAlgo::makeRecHit(const BTLDataFrame& dataF
   std::pair<float, float> amplitude(0., 0.);
   std::pair<float, float> time(0., 0.);
 
+  std::pair<float,float> position(-5.f,-5.f);   //position in unit mm
+
   unsigned char flag = 0;
 
   const auto& sampleLeft = dataFrame.sample(0);
   const auto& sampleRight = dataFrame.sample(1);
+
+  const float c_LYSO = 138.46235;     //in mm/ns (modified)    time in unit ns
+  const float bar_length = 57.0;      //in unit mm
 
   if (sampleLeft.data() > 0) {
     amplitude.first = float(sampleLeft.data()) * adcLSB_;
@@ -69,6 +74,9 @@ FTLUncalibratedRecHit BTLUncalibRecHitAlgo::makeRecHit(const BTLDataFrame& dataF
     time.second -= timeCorr_p0_ * pow(amplitude.second, timeCorr_p1_) + timeCorr_p2_;
     flag |= (0x1 << 1);
   }
+  //calculate the position
+  position.first = 0.5*(c_LYSO*(time.first-time.second)+bar_length);    //distance to left
+  position.second = 0.5*(bar_length-c_LYSO*(time.first-time.second));   //distance to right
 
   LogDebug("BTLUncalibRecHit") << "ADC+: set the charge to: (" << amplitude.first << ", " << amplitude.second << ")  ("
                                << sampleLeft.data() << ", " << sampleRight.data() << "  " << adcLSB_ << ' '
@@ -77,7 +85,7 @@ FTLUncalibratedRecHit BTLUncalibRecHitAlgo::makeRecHit(const BTLDataFrame& dataF
                                << sampleLeft.toa() << ", " << sampleRight.toa() << "  " << toaLSBToNS_ << ' '
                                << std::endl;
 
-  return FTLUncalibratedRecHit(dataFrame.id(), dataFrame.row(), dataFrame.column(), amplitude, time, timeError_, flag);
+  return FTLUncalibratedRecHit(dataFrame.id(), dataFrame.row(), dataFrame.column(), amplitude, time, position, timeError_, flag);
 }
 
 #include "FWCore/Framework/interface/MakerMacros.h"

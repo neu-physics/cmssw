@@ -13,6 +13,7 @@
 #include <vector>
 #include <iostream>
 #include <atomic>
+#include <cmath>
 using namespace std;
 
 //#define DEBUG_ENABLED
@@ -150,7 +151,7 @@ void MTDThresholdClusterizer::clusterize(const FTLRecHitCollection& input,
     //  on the way, and store them in theSeeds.
     for (auto itr = range.first; itr != range.second; ++itr) {
       const unsigned hitidx = itr->second;
-      copy_to_buffer(begin + hitidx);
+      copy_to_buffer(begin + hitidx, geom, topo);
     }
 
     FTLClusterCollection::FastFiller clustersOnDet(output, id);
@@ -191,16 +192,51 @@ void MTDThresholdClusterizer::clear_buffer(RecHitIterator itr) { theBuffer.clear
 //----------------------------------------------------------------------------
 //! \brief Copy FTLRecHit into the buffer, identify seeds.
 //----------------------------------------------------------------------------
-void MTDThresholdClusterizer::copy_to_buffer(RecHitIterator itr) {
+void MTDThresholdClusterizer::copy_to_buffer(RecHitIterator itr, const MTDGeometry* geom, const MTDTopology* topo) {
+  MTDDetId mtdId=MTDDetId(itr->detid());
   int row = itr->row();
   int col = itr->column();
+  int SubDet = 0;
   float energy = itr->energy();
   float time = itr->time();
   float timeError = itr->timeError();
+  float position = itr->position().second;
+  LocalError local_error(0,0,0);
+  GlobalPoint global_point(0,0,0);
+  if( mtdId.mtdSubDetector() == MTDDetId::BTL ){
+    SubDet = 1;
+    BTLDetId id = itr->id();
+    DetId geoId = id.geographicalId( (BTLDetId::CrysLayout) topo->getMTDTopologyMode() );
+    const auto& det = geom -> idToDet(geoId);
+    const ProxyMTDTopology& topoproxy = static_cast<const ProxyMTDTopology&>(det->topology());
+    const RectangularMTDTopology& topol = static_cast<const RectangularMTDTopology&>(topoproxy.specificTopology());    
+    MeasurementPoint mp(row,col);
+    LocalPoint lp_ctr = topol.localPosition(mp);
+    float z_offset = 2.85-(position/10.);  //need to add the offset as the distance from centre to edge (z direction in global and y direction in local)
+    LocalPoint lp(lp_ctr.x(),lp_ctr.y()+z_offset,lp_ctr.z());
+    GlobalPoint gp = det->toGlobal(lp);
+    global_point = gp;
+    BTLRecHitsErrorEstimatorIM I(det,lp);
+    LocalError err_modified = I.localError();
+    local_error = err_modified;
+  }
+  else if( mtdId.mtdSubDetector() == MTDDetId::ETL ){
+    SubDet = -1;
+    ETLDetId id = itr->id();
+    DetId geoId = id.geographicalId( );
+    const auto& det = geom -> idToDet(geoId);
+    const ProxyMTDTopology& topoproxy = static_cast<const ProxyMTDTopology&>(det->topology());
+    const RectangularMTDTopology& topol = static_cast<const RectangularMTDTopology&>(topoproxy.specificTopology());    
+    
+    MeasurementPoint mp(row,col);
+    LocalPoint lp = topol.localPosition(mp);
+    GlobalPoint gp = det->toGlobal(lp);
+    global_point = gp;global_point = gp;
+  }
 
   DEBUG("ROW " << row << " COL " << col << " ENERGY " << energy << " TIME " << time);
   if (energy > theHitThreshold) {
-    theBuffer.set(row, col, energy, time, timeError);
+    theBuffer.set(row, col, SubDet, energy, time, timeError, local_error, global_point);
     if (energy > theSeedThreshold)
       theSeeds.push_back(FTLCluster::FTLHitPos(row, col));
     //sort seeds?
@@ -212,9 +248,20 @@ void MTDThresholdClusterizer::copy_to_buffer(RecHitIterator itr) {
 //----------------------------------------------------------------------------
 FTLCluster MTDThresholdClusterizer::make_cluster(const FTLCluster::FTLHitPos& hit) {
   //First we acquire the seeds for the clusters
+  const float thePositionThreshold = 4.0;   //# sigmas 
+
+  float seed_subdet= theBuffer.SubDet(hit.row(),hit.col());
   float seed_energy = theBuffer.energy(hit.row(), hit.col());
   float seed_time = theBuffer.time(hit.row(), hit.col());
   float seed_time_error = theBuffer.time_error(hit.row(), hit.col());
+  double seed_eta = theBuffer.global_point(hit.row(),hit.col()).eta();
+  double seed_phi = theBuffer.global_point(hit.row(),hit.col()).phi();
+  double seed_z = theBuffer.global_point(hit.row(),hit.col()).z();
+  double seed_x= theBuffer.global_point(hit.row(), hit.col()).x();
+  double seed_y= theBuffer.global_point(hit.row(), hit.col()).y();
+  double seed_error_xx = theBuffer.local_error(hit.row(), hit.col()).xx();
+  double seed_error_yy = theBuffer.local_error(hit.row(), hit.col()).yy();
+  double R = theBuffer.global_point(hit.row(), hit.col()).transverse();
   theBuffer.clear(hit);
 
   AccretionCluster acluster;
@@ -237,6 +284,17 @@ FTLCluster MTDThresholdClusterizer::make_cluster(const FTLCluster::FTLHitPos& hi
               theTimeThreshold *
                   sqrt(theBuffer.time_error(r, c) * theBuffer.time_error(r, c) + seed_time_error * seed_time_error))
             continue;
+          if ((seed_subdet == 1) && (theBuffer.SubDet(r,c) == 1)){
+            double R_hit = theBuffer.global_point(r,c).transverse();
+            double x_hit = theBuffer.global_point(r,c).x();
+            double y_hit = theBuffer.global_point(r,c).y();
+            double z_hit = theBuffer.global_point(r,c).z();
+            double hit_error_xx = theBuffer.local_error(r,c).xx();
+            double hit_error_yy = theBuffer.local_error(r,c).yy();
+            //std::cout << (R_hit-R)*(R_hit-R)<<"    "<<pow((x_hit-seed_x),2)+pow((y_hit-seed_y),2)+pow((z_hit-seed_z),2) << std::endl;
+            if (sqrt(pow((x_hit - seed_x),2)+pow((y_hit-seed_y),2)+pow((z_hit-seed_z),2)) > thePositionThreshold*sqrt( hit_error_xx + seed_error_xx + hit_error_yy + seed_error_yy ))
+              continue;
+          }
           FTLCluster::FTLHitPos newhit(r, c);
           if (!acluster.add(newhit, theBuffer.energy(r, c), theBuffer.time(r, c), theBuffer.time_error(r, c))) {
             stopClus = true;
